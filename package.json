@@ -1,0 +1,17 @@
+{
+  "name": "qqbot-codex-bridge",
+  "version": "0.1.0",
+  "description": "Direct QQ Official Bot <-> Codex ACP bridge",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node index.js"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@agentclientprotocol/sdk": "^0.18.2",
+    "dotenv": "^17.4.1",
+    "qq-official-bot": "^1.0.12"
+  }
+}
