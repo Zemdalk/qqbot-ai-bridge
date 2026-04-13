@@ -1,4 +1,6 @@
 node_modules/
 .env
+.env.backup*
 session-state.json
+session-state.backup*.json
 *.log
