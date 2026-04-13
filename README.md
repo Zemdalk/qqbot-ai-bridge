@@ -47,10 +47,15 @@ npm run start
 
 - 私聊：默认直接触发。
 - 群聊：通过 QQ 官方 `GROUP_AT_MESSAGE_CREATE` 事件触发，默认已是 @ 触发。
-- 内置命令：`/help` `/status` `/ping` `/whoami`。
-  - `codex` 模式下，`/status` 显示本地 Codex 日志额度状态。
-  - `claude-acp` 模式下，`/status` 显示当前 Claude ACP Agent 配置。
-  - `claude-cli` 模式下，`/status` 显示当前 Claude CLI 配置摘要。
+- 内置命令：
+  - `/new`：关闭当前会话上下文，下一条消息将使用全新会话。
+  - `/help`：显示帮助信息。
+  - `/status`：
+    - `codex` 模式：显示本地 Codex 日志额度状态。
+    - `claude-acp` 模式：显示当前 Claude ACP Agent 配置。
+    - `claude-cli` 模式：显示当前 Claude CLI 配置摘要。
+  - `/ping`：连通性测试。
+  - `/whoami`：查看当前会话信息。
 
 ## Claude + GLM 配置示例
 
