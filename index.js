@@ -416,8 +416,20 @@ function formatThoughtMessage(text) {
 }
 
 async function safeReply(evt, text) {
-  const chunks = splitText(String(text || ''), config.maxReplyChars);
-  log(`[send] chunks=${chunks.length}, totalChars=${String(text || '').length}`);
+  const str = String(text || '');
+  // 如果内容含有 markdown 特征（标题/粗体/列表），尝试用 msg_type=2 发送
+  const looksLikeMarkdown = /^#{1,3} /m.test(str) || /\*\*[^*]+\*\*/.test(str);
+  if (looksLikeMarkdown) {
+    try {
+      await evt.reply([qqSegment.markdown(str)]);
+      log(`[send] markdown reply sent, totalChars=${str.length}`);
+      return;
+    } catch (err) {
+      log(`[send] markdown reply failed, fallback to plain text: ${String(err)}`);
+    }
+  }
+  const chunks = splitText(str, config.maxReplyChars);
+  log(`[send] chunks=${chunks.length}, totalChars=${str.length}`);
   for (const chunk of chunks) {
     try {
       await evt.reply(chunk);
