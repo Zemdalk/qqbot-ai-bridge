@@ -50,7 +50,7 @@ if (!config.appId || !config.appSecret) {
 
 const sessions = new Map();
 const persistedSessions = new Map();
-const sessionStatePath = process.env.SESSION_STATE_PATH || '/home/pi/qqbot-codex-bridge/session-state.json';
+const sessionStatePath = process.env.SESSION_STATE_PATH || '/home/pi/qqbot-ai-bridge/session-state.json';
 let cleanupTimer;
 let tokenRefreshTimer;
 let reconnectTimer;
@@ -417,24 +417,13 @@ function formatThoughtMessage(text) {
 
 async function safeReply(evt, text) {
   const str = String(text || '');
-  // 如果内容含有 markdown 特征（标题/粗体/列表），尝试用 msg_type=2 发送
-  const looksLikeMarkdown = /^#{1,3} /m.test(str) || /\*\*[^*]+\*\*/.test(str);
-  if (looksLikeMarkdown) {
-    try {
-      await evt.reply([qqSegment.markdown(str)]);
-      log(`[send] markdown reply sent, totalChars=${str.length}`);
-      return;
-    } catch (err) {
-      log(`[send] markdown reply failed, fallback to plain text: ${String(err)}`);
-    }
-  }
   const chunks = splitText(str, config.maxReplyChars);
-  log(`[send] chunks=${chunks.length}, totalChars=${str.length}`);
+  log(`[send] markdown chunks=${chunks.length}, totalChars=${str.length}`);
   for (const chunk of chunks) {
     try {
-      await evt.reply(chunk);
+      await evt.reply([qqSegment.markdown(chunk)]);
     } catch (err) {
-      log(`[send] reply failed: ${String(err)}`);
+      log(`[send] markdown reply failed: ${String(err)}`);
     }
   }
 }
@@ -923,7 +912,7 @@ async function spawnAcpAgent(sessionKey, onThought, restoreSessionId = '', provi
   const connection = new acp.ClientSideConnection(() => client, stream);
   const initResult = await connection.initialize({
     protocolVersion: acp.PROTOCOL_VERSION,
-    clientInfo: { name: 'qqbot-codex-bridge', title: 'qqbot-codex-bridge', version: '0.1.0' },
+    clientInfo: { name: 'qqbot-ai-bridge', title: 'qqbot-ai-bridge', version: '0.1.0' },
     clientCapabilities: { fs: { readTextFile: true, writeTextFile: true } },
   });
 
@@ -1056,7 +1045,7 @@ async function handleBuiltinCommand(evt, userText) {
       }
     }
     await safeReply(evt, [
-      'QQBot Codex Bridge',
+      'QQBot AI Bridge',
       '私聊直接发消息会自动交给 Codex。',
       '群聊里 @机器人 并发送消息会触发处理。',
       '',
@@ -1342,7 +1331,7 @@ function startBotHealthLoops(bot) {
 }
 
 async function main() {
-  log('starting qqbot-codex-bridge');
+  log('starting qqbot-ai-bridge');
   log(`sandbox=${config.sandbox}, allowGroup=${config.allowGroup}, privateEnabled=${config.privateEnabled}`);
   log(`showThoughts=${config.showThoughts}, thoughtPrefix='${config.thoughtPrefix}'`);
   const provider = getProvider();

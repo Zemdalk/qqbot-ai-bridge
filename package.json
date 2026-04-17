@@ -1,5 +1,5 @@
 {
-  "name": "qqbot-codex-bridge",
+  "name": "qqbot-ai-bridge",
   "version": "0.1.0",
   "description": "Direct QQ Official Bot <-> Codex ACP bridge",
   "type": "module",
