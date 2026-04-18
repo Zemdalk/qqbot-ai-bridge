@@ -1,101 +1,66 @@
 # qqbot-ai-bridge
 
-QQ 官方机器人桥接服务，支持 `Codex ACP` 与 `Claude ACP` 双后端（不依赖 OpenClaw）。
+将 QQ 官方机器人接入 AI 编程智能体（Claude Code / Codex）的桥接服务，通过 [Agent Communication Protocol (ACP)](https://agentcommunicationprotocol.dev/) 与后端通信。
 
 ## 功能
 
-- 私聊消息：自动转给当前模型后端处理
-- 群聊消息：仅在 `@机器人` 时触发（依赖 `GROUP_AT_MESSAGE_CREATE`）
-- 按用户/群会话隔离，维护后端会话上下文
-- 支持重启后恢复会话上下文（基于本地 `sessionId` 持久化）
-- 支持思考/工具进度转发（可关闭）
-- 长消息自动分片发送，避免截断
+- **私聊**：消息自动转发给 AI 后端处理并回复
+- **群聊**：仅 @ 机器人时触发（需 `GROUP_AT_MESSAGE_CREATE` Intent）
+- 按用户/群隔离会话上下文，支持重启后恢复（基于本地 `session-state.json`）
+- 支持思考过程/工具进度转发（可关闭）
+- 长消息自动分片，避免 QQ 截断
+- 内置命令：`/new` `/help` `/status` `/ping` `/whoami`
 
-## 准备
+## 支持的后端
 
-1. Node.js >= 18
-2. 配置 `.env`（从 `.env.example` 复制）
-3. 根据后端准备运行环境：
-   - `MODEL_PROVIDER=codex`：确保本机可以运行 `npx -y @zed-industries/codex-acp`
-   - `MODEL_PROVIDER=claude`：确保本机可运行 `npx -y @agentclientprotocol/claude-agent-acp`
+| `MODEL_PROVIDER` | 说明 |
+|---|---|
+| `codex` | 通过 ACP 调用 [Zed Codex](https://github.com/zed-industries/zed) |
+| `claude` / `claude-acp` | 通过 ACP 调用 [claude-agent-acp](https://www.npmjs.com/package/@agentclientprotocol/claude-agent-acp) |
+| `claude-cli` | 直接调用 `claude` CLI，stream-json 模式（兜底方案） |
 
-## 启动
+## 快速开始
+
+### 1. 前置条件
+
+- Node.js >= 18
+- 在 [QQ 开放平台](https://bot.q.qq.com/) 创建机器人，获取 `AppID` 和 `AppSecret`
+- 根据所选后端安装对应工具：
+  - `codex`：确保可执行 `npx -y @zed-industries/codex-acp`
+  - `claude-acp`：确保可执行 `npx -y @agentclientprotocol/claude-agent-acp`
+  - `claude-cli`：安装 [Claude Code](https://docs.anthropic.com/claude-code)
+
+### 2. 安装
 
 ```bash
-cd /home/pi/qqbot-ai-bridge
-cp .env.example .env
-# 编辑 .env，填入 QQBOT_APP_SECRET
+git clone https://github.com/Zemdalk/qqbot-ai-bridge.git
+cd qqbot-ai-bridge
 npm install
+cp .env.example .env
+```
+
+### 3. 配置
+
+编辑 `.env`，至少填写：
+
+```env
+QQBOT_APP_ID=your_app_id
+QQBOT_APP_SECRET=your_app_secret
+MODEL_PROVIDER=claude   # 或 codex / claude-cli
+```
+
+完整配置项见 [`.env.example`](.env.example)。
+
+### 4. 启动
+
+```bash
 npm run start
 ```
 
-## 核心环境变量
-
-- `QQBOT_APP_ID` / `QQBOT_APP_SECRET`：QQ 官方机器人凭证
-- `QQBOT_INTENTS`：建议默认 `GROUP_AT_MESSAGE_CREATE,C2C_MESSAGE_CREATE`
-- `SHOW_THOUGHTS`：是否转发思考/工具进度
-- `THOUGHT_PREFIX`：思考消息前缀；留空可不加前缀
-- `MAX_REPLY_CHARS`：单条回复最大字符数
-- `MODEL_PROVIDER`：模型后端，`codex` / `claude` / `claude-acp` / `claude-cli`
-- `AGENT_COMMAND` / `AGENT_ARGS`：Codex ACP Agent 启动命令（`MODEL_PROVIDER=codex`）
-- `CLAUDE_ACP_COMMAND` / `CLAUDE_ACP_ARGS`：Claude ACP Agent 启动命令（`MODEL_PROVIDER=claude` 或 `claude-acp`）
-- `CLAUDE_COMMAND` / `CLAUDE_MODEL`：Claude CLI 启动命令和模型（`MODEL_PROVIDER=claude-cli`）
-- `SESSION_STATE_PATH`：会话持久化文件（默认 `/home/pi/qqbot-ai-bridge/session-state.json`）
-- `MAX_PROMPT_TIMEOUT_MS`：单次模型调用硬上限（默认 120000ms）
-
-## 行为说明
-
-- 私聊：默认直接触发。
-- 群聊：通过 QQ 官方 `GROUP_AT_MESSAGE_CREATE` 事件触发，默认已是 @ 触发。
-- 内置命令：
-  - `/new`：关闭当前会话上下文，下一条消息将使用全新会话。
-  - `/help`：显示帮助信息。
-  - `/status`：
-    - `codex` 模式：显示本地 Codex 日志额度状态。
-    - `claude-acp` 模式：显示当前 Claude ACP Agent 配置。
-    - `claude-cli` 模式：显示当前 Claude CLI 配置摘要。
-  - `/ping`：连通性测试。
-  - `/whoami`：查看当前会话信息。
-
-## Claude + GLM 配置示例
-
-先安装 Claude Code：
-
-```bash
-sudo /usr/local/nodejs/bin/npm install -g @anthropic-ai/claude-code
-```
-
-然后配置 `~/.claude/settings.json`（示例）：
-
-```json
-{
-  "env": {
-    "ANTHROPIC_AUTH_TOKEN": "your_glm_api_key",
-    "ANTHROPIC_BASE_URL": "https://open.bigmodel.cn/api/anthropic",
-    "API_TIMEOUT_MS": "3000000",
-    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
-    "ANTHROPIC_MODEL": "glm-5.1",
-    "ANTHROPIC_DEFAULT_OPUS_MODEL": "glm-5.1",
-    "ANTHROPIC_DEFAULT_SONNET_MODEL": "glm-5.1",
-    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "glm-4.5-air"
-  },
-  "model": "opus"
-}
-```
-
-并在桥接 `.env` 中切换到 Claude ACP：
-
-```bash
-MODEL_PROVIDER=claude
-CLAUDE_ACP_COMMAND=/usr/local/nodejs/bin/claude-agent-acp
-CLAUDE_ACP_ARGS=
-```
-
-## systemd（推荐）
-
-`/etc/systemd/system/qqbot-ai-bridge.service`:
+## systemd 部署（推荐）
 
 ```ini
+# /etc/systemd/system/qqbot-ai-bridge.service
 [Unit]
 Description=QQBot AI Bridge
 After=network-online.target
@@ -104,9 +69,9 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=pi
-WorkingDirectory=/home/pi/qqbot-ai-bridge
-EnvironmentFile=/home/pi/qqbot-ai-bridge/.env
-ExecStart=/usr/bin/node /home/pi/qqbot-ai-bridge/index.js
+WorkingDirectory=/path/to/qqbot-ai-bridge
+EnvironmentFile=/path/to/qqbot-ai-bridge/.env
+ExecStart=/usr/bin/node /path/to/qqbot-ai-bridge/index.js
 Restart=always
 RestartSec=3
 
@@ -114,11 +79,60 @@ RestartSec=3
 WantedBy=multi-user.target
 ```
 
-启用：
-
 ```bash
 sudo systemctl daemon-reload
 sudo systemctl enable --now qqbot-ai-bridge
-sudo systemctl status qqbot-ai-bridge
 journalctl -u qqbot-ai-bridge -f
 ```
+
+## 使用 Claude Code + GLM 替代 Anthropic API
+
+如果你想用智谱 GLM 替代 Anthropic 官方 API（通过 Claude Code 的兼容接口），在 `~/.claude/settings.json` 中配置：
+
+```json
+{
+  "env": {
+    "ANTHROPIC_AUTH_TOKEN": "your_glm_api_key",
+    "ANTHROPIC_BASE_URL": "https://open.bigmodel.cn/api/anthropic",
+    "ANTHROPIC_MODEL": "glm-4-plus",
+    "API_TIMEOUT_MS": "300000",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"
+  }
+}
+```
+
+然后在 `.env` 中选择 Claude ACP 后端：
+
+```env
+MODEL_PROVIDER=claude-acp
+CLAUDE_ACP_COMMAND=claude-agent-acp
+```
+
+## 内置命令
+
+| 命令 | 说明 |
+|---|---|
+| `/new` | 重置当前会话上下文 |
+| `/help` | 查看帮助 |
+| `/status` | 查看后端状态/额度 |
+| `/ping` | 连通性测试 |
+| `/whoami` | 查看当前会话信息 |
+
+## 主要环境变量
+
+| 变量 | 说明 | 默认值 |
+|---|---|---|
+| `QQBOT_APP_ID` | QQ 机器人 AppID | 必填 |
+| `QQBOT_APP_SECRET` | QQ 机器人 AppSecret | 必填 |
+| `MODEL_PROVIDER` | 后端类型 | `codex` |
+| `MAX_REPLY_CHARS` | 单条回复最大字符数 | `900` |
+| `SHOW_THOUGHTS` | 是否转发思考/工具进度 | `true` |
+| `IDLE_TIMEOUT_MS` | 会话空闲超时（ms） | `86400000` |
+| `PRIVATE_WHITELIST` | 私聊白名单（逗号分隔 OpenID，空=不限） | 空 |
+| `GROUP_WHITELIST` | 群聊白名单（逗号分隔，空=不限） | 空 |
+
+完整列表见 `.env.example`。
+
+## License
+
+MIT
