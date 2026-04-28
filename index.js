@@ -1,6 +1,6 @@
 import 'dotenv/config';
 import fs from 'node:fs/promises';
-import { spawn } from 'node:child_process';
+import { spawn, execFile } from 'node:child_process';
 import { Readable, Writable } from 'node:stream';
 import * as acp from '@agentclientprotocol/sdk';
 import { Bot, ReceiverMode, segment as qqSegment } from 'qq-official-bot';
@@ -29,7 +29,9 @@ const config = {
   tokenRefreshCheckMs: Number(process.env.TOKEN_REFRESH_CHECK_MS || 15000),
   tokenRefreshThresholdMs: Number(process.env.TOKEN_REFRESH_THRESHOLD_MS || 30000),
   reconnectCheckMs: Number(process.env.RECONNECT_CHECK_MS || 20000),
+  replyTimeoutMs: Number(process.env.REPLY_TIMEOUT_MS || 15000),
   acpPostPromptGraceMs: Number(process.env.ACP_POST_PROMPT_GRACE_MS || 350),
+  acpPostPromptMaxWaitMs: Number(process.env.ACP_POST_PROMPT_MAX_WAIT_MS || 2500),
 
   modelProvider: (process.env.MODEL_PROVIDER || 'codex').toLowerCase(),
   agentCommand: process.env.AGENT_COMMAND || 'npx',
@@ -50,6 +52,8 @@ if (!config.appId || !config.appSecret) {
 
 const sessions = new Map();
 const persistedSessions = new Map();
+const pendingFrenchQuizzes = new Map();
+const frenchQuizAnswerTtlMs = 12 * 60 * 60 * 1000;
 const sessionStatePath = process.env.SESSION_STATE_PATH || '/home/pi/qqbot-ai-bridge/session-state.json';
 let cleanupTimer;
 let tokenRefreshTimer;
@@ -246,6 +250,12 @@ function splitText(text, limit = 900) {
   return out;
 }
 
+function isDeepSeekThinkingCompatError(err) {
+  const msg = String(err || '').toLowerCase();
+  return msg.includes('content[].thinking')
+    || msg.includes('thinking mode must be passed back to the api');
+}
+
 function formatResetAt(unixSeconds) {
   const ts = Number(unixSeconds || 0);
   if (!Number.isFinite(ts) || ts <= 0) return 'unknown';
@@ -350,6 +360,131 @@ function trimReply(text) {
   return cleaned;
 }
 
+function escapeRegExp(text) {
+  return String(text || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function normalizeFrenchText(text) {
+  return String(text || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[’]/g, "'")
+    .normalize('NFD')
+    .replace(/\p{Diacritic}+/gu, '')
+    .replace(/[.,!?;:()[\]{}]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function parseFrenchQuizSubmission(raw) {
+  const input = String(raw || '').trim();
+  if (!input) return null;
+
+  let choiceAnswer = '';
+  let fillAnswer = '';
+
+  const choiceLabel = input.match(/(?:选择|choice)\s*[:：]\s*([^\n]+)/i);
+  if (choiceLabel) choiceAnswer = choiceLabel[1].trim();
+
+  const fillLabel = input.match(/(?:填空|fill)\s*[:：]\s*([^\n]+)/i);
+  if (fillLabel) fillAnswer = fillLabel[1].trim();
+
+  if ((!choiceAnswer || !fillAnswer) && input.includes('|')) {
+    const parts = input.split('|');
+    if (!choiceAnswer) choiceAnswer = String(parts[0] || '').trim();
+    if (!fillAnswer) fillAnswer = String(parts.slice(1).join('|') || '').trim();
+  }
+
+  if (!choiceAnswer || !fillAnswer) {
+    const lines = input.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+    if (lines.length >= 2) {
+      if (!choiceAnswer) choiceAnswer = lines[0];
+      if (!fillAnswer) fillAnswer = lines.slice(1).join(' ');
+    }
+  }
+
+  if (!choiceAnswer) {
+    const letter = input.match(/\b([a-e])\b/i);
+    if (letter) choiceAnswer = letter[1];
+  }
+
+  if (!fillAnswer && choiceAnswer) {
+    let rest = input.replace(new RegExp(`\\b${escapeRegExp(choiceAnswer)}\\b`, 'i'), ' ');
+    rest = rest.replace(/(?:选择|choice|填空|fill)\s*[:：]/gi, ' ');
+    rest = rest.replace(/[|,，;]/g, ' ').replace(/\s+/g, ' ').trim();
+    if (rest) fillAnswer = rest;
+  }
+
+  if (!choiceAnswer || !fillAnswer) return null;
+  return {
+    choiceAnswer: choiceAnswer.trim(),
+    fillAnswer: fillAnswer.trim(),
+  };
+}
+
+function resolveChoiceLetterFromAnswer(answer, options) {
+  const raw = String(answer || '').trim();
+  if (!raw) return '';
+  if (/^[a-e]$/i.test(raw)) return raw.toUpperCase();
+
+  const normalized = normalizeFrenchText(raw);
+  const labels = ['A', 'B', 'C', 'D', 'E'];
+  for (let i = 0; i < Math.min(options.length, labels.length); i += 1) {
+    if (normalizeFrenchText(options[i]) === normalized) return labels[i];
+  }
+  return '';
+}
+
+async function handleFrenchQuizAnswer(evt, userText) {
+  const key = getSessionKey(evt);
+  const pending = pendingFrenchQuizzes.get(key);
+  if (!pending) return false;
+
+  const raw = String(userText || '').trim();
+  if (!raw || raw.startsWith('/')) return false;
+
+  if (Date.now() - pending.createdAt > frenchQuizAnswerTtlMs) {
+    pendingFrenchQuizzes.delete(key);
+    await safeReply(evt, '这组法语题已过期，请重新发送 /fr 获取新题。');
+    return true;
+  }
+
+  const parsed = parseFrenchQuizSubmission(raw);
+  if (!parsed) {
+    await safeReply(evt, [
+      '答题格式不对，请按下面任一格式回复：',
+      'A 你的填空答案',
+      '或两行：第一行填 A/B/C/D，第二行填空答案',
+      '例如：D habite',
+    ].join('\n'));
+    return true;
+  }
+
+  const userChoiceLetter = resolveChoiceLetterFromAnswer(parsed.choiceAnswer, pending.choice.options || []);
+  const correctChoiceLetter = String(pending.choice.correctLetter || '').toUpperCase();
+  const choiceOk = userChoiceLetter && correctChoiceLetter && userChoiceLetter === correctChoiceLetter;
+
+  const userFillNorm = normalizeFrenchText(parsed.fillAnswer);
+  const correctFill = String(pending.fill.correctText || '').trim();
+  const fillOk = userFillNorm && userFillNorm === normalizeFrenchText(correctFill);
+
+  const score = Number(choiceOk) + Number(fillOk);
+  pendingFrenchQuizzes.delete(key);
+
+  const choiceAnswerText = pending.choice.options?.length && correctChoiceLetter
+    ? `${correctChoiceLetter}. ${pending.choice.options[correctChoiceLetter.charCodeAt(0) - 65] || pending.choice.correctText}`
+    : pending.choice.correctText;
+
+  await safeReply(evt, [
+    '🇫🇷 法语练习批改结果',
+    `选择题：${choiceOk ? '✅ 正确' : '❌ 错误'}（你的答案：${parsed.choiceAnswer}；正确答案：${choiceAnswerText || pending.choice.correctText}）`,
+    `填空题：${fillOk ? '✅ 正确' : '❌ 错误'}（你的答案：${parsed.fillAnswer}；正确答案：${correctFill}）`,
+    `得分：${score}/2`,
+    '发送 /fr 可再来一组。',
+  ].join('\n'));
+  return true;
+}
+
 function isSkillQuery(text) {
   const s = String(text || '').trim().toLowerCase();
   if (!s) return false;
@@ -404,6 +539,7 @@ function buildSlashCommandMarkdown() {
     makeCmdInputTag('/new', '/new 新建会话'),
     makeCmdInputTag('/status', '/status 查看额度状态'),
     makeCmdInputTag('/whoami', '/whoami 查看会话信息'),
+    makeCmdInputTag('/fr', '/fr 法语动词变位练习（1选择+1填空）'),
     makeCmdInputTag('/ping', '/ping 连通性测试'),
     makeCmdInputTag('/help', '/help 查看帮助'),
   ].join('\n');
@@ -421,7 +557,11 @@ async function safeReply(evt, text) {
   log(`[send] markdown chunks=${chunks.length}, totalChars=${str.length}`);
   for (const chunk of chunks) {
     try {
-      await evt.reply([qqSegment.markdown(chunk)]);
+      await withTimeout(
+        evt.reply([qqSegment.markdown(chunk)]),
+        Math.max(config.replyTimeoutMs, 3000),
+        `reply timeout after ${Math.max(config.replyTimeoutMs, 3000)}ms`,
+      );
     } catch (err) {
       log(`[send] markdown reply failed: ${String(err)}`);
     }
@@ -499,6 +639,8 @@ class QqAcpClient {
   constructor(opts) {
     this.opts = opts;
     this.chunks = [];
+    this.chunkVersion = 0;
+    this.lastChunkAt = 0;
     this.thoughtChunks = [];
     this.lastThoughtAt = 0;
     this.lastThinkingPulseAt = 0;
@@ -531,22 +673,30 @@ class QqAcpClient {
       return '';
     };
 
+    const pushChunk = (text) => {
+      const chunk = String(text || '');
+      if (!chunk) return;
+      this.chunks.push(chunk);
+      this.chunkVersion += 1;
+      this.lastChunkAt = Date.now();
+    };
+
     switch (update.sessionUpdate) {
       case 'agent_message_chunk':
-        if (update.content?.type === 'text') this.chunks.push(update.content.text);
+        if (update.content?.type === 'text') pushChunk(update.content.text);
         await this.maybeFlushThoughts(false);
         break;
 
       case 'agent_message': {
         const text = collectText(update.content) || collectText(update.message) || collectText(update);
-        if (text) this.chunks.push(text);
+        if (text) pushChunk(text);
         await this.maybeFlushThoughts(false);
         break;
       }
 
       case 'message': {
         const text = collectText(update.content) || collectText(update.message) || collectText(update);
-        if (text) this.chunks.push(text);
+        if (text) pushChunk(text);
         await this.maybeFlushThoughts(false);
         break;
       }
@@ -609,6 +759,33 @@ class QqAcpClient {
     const text = this.chunks.join('');
     this.chunks = [];
     return text;
+  }
+
+  async flushAfterQuiet(quietMs = 350, maxWaitMs = 2500) {
+    const quietWindowMs = Math.max(50, Number(quietMs) || 350);
+    const hardWaitMs = Math.max(quietWindowMs, Number(maxWaitMs) || 2500);
+    const pollMs = Math.min(100, Math.max(20, Math.floor(quietWindowMs / 4)));
+    const start = Date.now();
+    let seenVersion = this.chunkVersion;
+    let seenAt = this.lastChunkAt;
+
+    while (Date.now() - start < hardWaitMs) {
+      const hasChunks = this.chunks.length > 0;
+      if (hasChunks) {
+        const idleForMs = seenAt > 0 ? (Date.now() - seenAt) : Infinity;
+        if (idleForMs >= quietWindowMs) break;
+      } else if (Date.now() - start >= quietWindowMs) {
+        break;
+      }
+
+      await sleep(pollMs);
+      if (this.chunkVersion !== seenVersion) {
+        seenVersion = this.chunkVersion;
+        seenAt = this.lastChunkAt;
+      }
+    }
+
+    return this.flush();
   }
 
   getAvailableCommands() {
@@ -1050,11 +1227,13 @@ async function handleBuiltinCommand(evt, userText) {
       '群聊里 @机器人 并发送消息会触发处理。',
       '',
       '内置指令:',
-      '/new',
-      '/status',
-      '/ping',
-      '/whoami',
-      '/help',
+      '/new      新建会话',
+      '/status   查看额度状态',
+      '/ping     连通性测试',
+      '/whoami   查看会话信息',
+      '/fr       法语动词变位练习（先答题，再判分）',
+      '          答题格式示例：D habite',
+      '/help     查看帮助',
     ].join('\n'));
     return true;
   }
@@ -1071,6 +1250,7 @@ async function handleBuiltinCommand(evt, userText) {
       s.lastActivity = Date.now();
     }
     clearPersistedSession(key);
+    pendingFrenchQuizzes.delete(key);
     await safeReply(evt, '已开启新会话。下一条消息将使用全新上下文。');
     return true;
   }
@@ -1095,6 +1275,47 @@ async function handleBuiltinCommand(evt, userText) {
       const status = await readCodexRateStatus();
       await safeReply(evt, status.ok ? status.text : `查询失败：${status.error}`);
     }
+    return true;
+  }
+
+  if (lower === '/fr') {
+    const key = getSessionKey(evt);
+    const quiz = await new Promise((resolve) => {
+      execFile('/usr/bin/python3', ['/home/pi/scripts/fr_quiz.py', '--json'], { timeout: 15000 }, (err, stdout) => {
+        if (err || !stdout.trim()) {
+          resolve(null);
+          return;
+        }
+        try {
+          const parsed = JSON.parse(stdout);
+          if (!parsed?.ok) {
+            resolve(null);
+            return;
+          }
+          resolve(parsed);
+        } catch {
+          resolve(null);
+        }
+      });
+    });
+
+    if (!quiz) {
+      await safeReply(evt, '题库加载失败，请稍后再试。');
+      return true;
+    }
+
+    pendingFrenchQuizzes.set(key, {
+      createdAt: Date.now(),
+      choice: quiz.choice || {},
+      fill: quiz.fill || {},
+    });
+
+    await safeReply(evt, [
+      String(quiz.prompt || '').trim(),
+      '',
+      '请回复你的答案，我会自动批改。',
+      '格式：A 填空答案（例如：D habite）',
+    ].join('\n'));
     return true;
   }
 
@@ -1149,10 +1370,18 @@ async function processSession(session) {
           log(`[${session.key}] handled by builtin command`);
           continue;
         }
+        if (await handleFrenchQuizAnswer(evt, userText)) {
+          log(`[${session.key}] handled by french quiz answer`);
+          continue;
+        }
 
-        const effectivePromptTimeoutMs = Math.min(
-          config.promptTimeoutMs,
-          Math.max(config.maxPromptTimeoutMs, 10_000),
+        const effectivePromptTimeoutMs = Math.max(
+          10_000,
+          Math.min(
+            config.promptTimeoutMs,
+            config.maxPromptTimeoutMs,
+            120_000,
+          ),
         );
         const provider = getProvider();
         const agent = await getOrCreateAgent(session, evt);
@@ -1188,9 +1417,10 @@ async function processSession(session) {
               `acp prompt timeout after ${effectivePromptTimeoutMs}ms`,
             );
             log(`[${session.key}] prompt stopReason=${String(result?.stopReason || 'unknown')}`);
-            await sleep(config.acpPostPromptGraceMs);
-
-            let text = await acpAgent.client.flush();
+            let text = await acpAgent.client.flushAfterQuiet(
+              config.acpPostPromptGraceMs,
+              config.acpPostPromptMaxWaitMs,
+            );
             if (!text.trim()) {
               const fromResult = extractTextFromAcpPromptResult(result);
               if (fromResult) {
@@ -1207,7 +1437,20 @@ async function processSession(session) {
             return text;
           };
 
-          replyText = await runAcpPromptOnce(agent);
+          try {
+            replyText = await runAcpPromptOnce(agent);
+          } catch (err) {
+            if (provider === 'claude-acp' && isDeepSeekThinkingCompatError(err)) {
+              log(`[${session.key}] DeepSeek thinking compatibility error, clear session and retry once`);
+              if (session.agent?.process) killAgent(session.agent.process);
+              session.agent = null;
+              clearPersistedSession(session.key);
+              const freshAgent = await getOrCreateAgent(session, evt);
+              replyText = await runAcpPromptOnce(freshAgent);
+            } else {
+              throw err;
+            }
+          }
           if (!replyText.trim() && provider === 'claude-acp') {
             log(`[${session.key}] empty ACP reply, recreate claude session and retry once`);
             if (session.agent?.process) killAgent(session.agent.process);

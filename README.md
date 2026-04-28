@@ -128,6 +128,8 @@ CLAUDE_ACP_COMMAND=claude-agent-acp
 | `MAX_REPLY_CHARS` | 单条回复最大字符数 | `900` |
 | `SHOW_THOUGHTS` | 是否转发思考/工具进度 | `true` |
 | `IDLE_TIMEOUT_MS` | 会话空闲超时（ms） | `86400000` |
+| `ACP_POST_PROMPT_GRACE_MS` | ACP 收尾静默窗口（ms） | `350` |
+| `ACP_POST_PROMPT_MAX_WAIT_MS` | ACP 收尾最大等待（ms） | `2500` |
 | `PRIVATE_WHITELIST` | 私聊白名单（逗号分隔 OpenID，空=不限） | 空 |
 | `GROUP_WHITELIST` | 群聊白名单（逗号分隔，空=不限） | 空 |
 
