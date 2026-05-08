@@ -9,7 +9,7 @@
 - 按用户/群隔离会话上下文，支持重启后恢复（基于本地 `session-state.json`）
 - 支持思考过程/工具进度转发（可关闭）
 - 长消息自动分片，避免 QQ 截断
-- 内置命令：`/new` `/help` `/status` `/ping` `/whoami`
+- 内置命令：`/new` `/help` `/status` `/ip` `/ping` `/whoami`
 
 ## 支持的后端
 
@@ -114,7 +114,8 @@ CLAUDE_ACP_COMMAND=claude-agent-acp
 |---|---|
 | `/new` | 重置当前会话上下文 |
 | `/help` | 查看帮助 |
-| `/status` | 查看后端状态/额度 |
+| `/status` | 查看后端状态/额度（DeepSeek-Claude 配置下会查询 DeepSeek `GET /user/balance`） |
+| `/ip` | 查询当前公网 IP（`cip.cc`，no-proxy）并给出 `ssh -p 9780 pi@<ip>` |
 | `/ping` | 连通性测试 |
 | `/whoami` | 查看当前会话信息 |
 
@@ -130,6 +131,7 @@ CLAUDE_ACP_COMMAND=claude-agent-acp
 | `IDLE_TIMEOUT_MS` | 会话空闲超时（ms） | `86400000` |
 | `ACP_POST_PROMPT_GRACE_MS` | ACP 收尾静默窗口（ms） | `350` |
 | `ACP_POST_PROMPT_MAX_WAIT_MS` | ACP 收尾最大等待（ms） | `2500` |
+| `MESSAGE_DEDUP_TTL_MS` | 入站消息去重 TTL（ms） | `120000` |
 | `PRIVATE_WHITELIST` | 私聊白名单（逗号分隔 OpenID，空=不限） | 空 |
 | `GROUP_WHITELIST` | 群聊白名单（逗号分隔，空=不限） | 空 |
 
