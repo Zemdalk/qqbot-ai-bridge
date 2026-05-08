@@ -32,6 +32,7 @@ const config = {
   replyTimeoutMs: Number(process.env.REPLY_TIMEOUT_MS || 15000),
   acpPostPromptGraceMs: Number(process.env.ACP_POST_PROMPT_GRACE_MS || 350),
   acpPostPromptMaxWaitMs: Number(process.env.ACP_POST_PROMPT_MAX_WAIT_MS || 2500),
+  messageDedupTtlMs: Number(process.env.MESSAGE_DEDUP_TTL_MS || 120000),
 
   modelProvider: (process.env.MODEL_PROVIDER || 'codex').toLowerCase(),
   agentCommand: process.env.AGENT_COMMAND || 'npx',
@@ -52,6 +53,7 @@ if (!config.appId || !config.appSecret) {
 
 const sessions = new Map();
 const persistedSessions = new Map();
+const seenMessageIds = new Map();
 const pendingFrenchQuizzes = new Map();
 const frenchQuizAnswerTtlMs = 12 * 60 * 60 * 1000;
 const sessionStatePath = process.env.SESSION_STATE_PATH || '/home/pi/qqbot-ai-bridge/session-state.json';
@@ -250,6 +252,28 @@ function splitText(text, limit = 900) {
   return out;
 }
 
+function getEventMessageId(evt) {
+  const id = String(evt?.message_id || evt?.id || '').trim();
+  return id || '';
+}
+
+function cleanupSeenMessageIds(nowTs = Date.now()) {
+  const ttl = Math.max(10_000, Number(config.messageDedupTtlMs || 120000));
+  for (const [id, ts] of seenMessageIds) {
+    if (nowTs - ts > ttl) seenMessageIds.delete(id);
+  }
+}
+
+function shouldDropDuplicateEvent(evt) {
+  const id = getEventMessageId(evt);
+  if (!id) return false;
+  const nowTs = Date.now();
+  cleanupSeenMessageIds(nowTs);
+  if (seenMessageIds.has(id)) return true;
+  seenMessageIds.set(id, nowTs);
+  return false;
+}
+
 function isDeepSeekThinkingCompatError(err) {
   const msg = String(err || '').toLowerCase();
   return msg.includes('content[].thinking')
@@ -349,6 +373,73 @@ async function readCodexRateStatus() {
     `total_tokens: ${total.total_tokens ?? 'n/a'} (in=${total.input_tokens ?? 'n/a'}, cached_in=${total.cached_input_tokens ?? 'n/a'}, out=${total.output_tokens ?? 'n/a'}, reasoning_out=${total.reasoning_output_tokens ?? 'n/a'})`,
     `last_tokens: ${last.total_tokens ?? 'n/a'} (in=${last.input_tokens ?? 'n/a'}, cached_in=${last.cached_input_tokens ?? 'n/a'}, out=${last.output_tokens ?? 'n/a'}, reasoning_out=${last.reasoning_output_tokens ?? 'n/a'})`,
     `log_file: ${latestFile}`,
+  ].join('\n');
+
+  return { ok: true, text };
+}
+
+function getDeepSeekBalanceEndpoint(rawBaseUrl) {
+  const base = String(rawBaseUrl || '').trim();
+  if (!base) return '';
+  try {
+    const u = new URL(base);
+    // DeepSeek Anthropic compatibility base is usually https://api.deepseek.com/anthropic
+    // Balance API lives under /user/balance on the same origin.
+    return `${u.origin}/user/balance`;
+  } catch {
+    return '';
+  }
+}
+
+async function readDeepSeekBalanceStatus() {
+  const token = String(process.env.ANTHROPIC_AUTH_TOKEN || '').trim();
+  const base = String(process.env.ANTHROPIC_BASE_URL || '').trim();
+  const endpoint = getDeepSeekBalanceEndpoint(base);
+
+  if (!token) return { ok: false, error: '未配置 ANTHROPIC_AUTH_TOKEN' };
+  if (!endpoint) return { ok: false, error: '未配置有效的 ANTHROPIC_BASE_URL' };
+
+  let res;
+  try {
+    res = await fetch(endpoint, {
+      method: 'GET',
+      headers: {
+        Accept: 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+    });
+  } catch (e) {
+    return { ok: false, error: `请求 DeepSeek 余额接口失败: ${String(e?.message || e)}` };
+  }
+
+  let data = {};
+  try {
+    data = await res.json();
+  } catch {
+    data = {};
+  }
+
+  if (!res.ok) {
+    return {
+      ok: false,
+      error: `DeepSeek 余额接口返回 ${res.status}${data?.error?.message ? `: ${data.error.message}` : ''}`,
+    };
+  }
+
+  const infos = Array.isArray(data?.balance_infos) ? data.balance_infos : [];
+  const lines = infos.map((it) => {
+    const currency = it?.currency || 'unknown';
+    const total = it?.total_balance ?? 'n/a';
+    const granted = it?.granted_balance ?? 'n/a';
+    const toppedUp = it?.topped_up_balance ?? 'n/a';
+    return `${currency}: total=${total}, granted=${granted}, topped_up=${toppedUp}`;
+  });
+
+  const text = [
+    'DeepSeek 额度状态',
+    `is_available: ${String(Boolean(data?.is_available))}`,
+    ...(lines.length > 0 ? lines : ['balance_infos: empty']),
+    `endpoint: ${endpoint}`,
   ].join('\n');
 
   return { ok: true, text };
@@ -538,11 +629,39 @@ function buildSlashCommandMarkdown() {
     '',
     makeCmdInputTag('/new', '/new 新建会话'),
     makeCmdInputTag('/status', '/status 查看额度状态'),
+    makeCmdInputTag('/ip', '/ip 查询公网IP与SSH命令'),
     makeCmdInputTag('/whoami', '/whoami 查看会话信息'),
     makeCmdInputTag('/fr', '/fr 法语动词变位练习（1选择+1填空）'),
     makeCmdInputTag('/ping', '/ping 连通性测试'),
     makeCmdInputTag('/help', '/help 查看帮助'),
   ].join('\n');
+}
+
+async function readPublicIpFromCipCcNoProxy() {
+  const env = { ...process.env };
+  delete env.http_proxy;
+  delete env.https_proxy;
+  delete env.all_proxy;
+  delete env.HTTP_PROXY;
+  delete env.HTTPS_PROXY;
+  delete env.ALL_PROXY;
+
+  const output = await new Promise((resolve, reject) => {
+    execFile('/usr/bin/curl', ['-s', 'cip.cc'], { timeout: 12000, env }, (err, stdout) => {
+      if (err) {
+        reject(err);
+        return;
+      }
+      resolve(String(stdout || ''));
+    });
+  });
+
+  const ip = output.match(/^IP\s*:\s*(.+)$/m)?.[1]?.trim() || '';
+  const addr = output.match(/^地址\s*:\s*(.+)$/m)?.[1]?.trim() || '';
+  const isp = output.match(/^运营商\s*:\s*(.+)$/m)?.[1]?.trim() || '';
+
+  if (!ip) return { ok: false, error: 'cip.cc 未返回 IP' };
+  return { ok: true, ip, addr, isp };
 }
 
 function formatThoughtMessage(text) {
@@ -1229,6 +1348,7 @@ async function handleBuiltinCommand(evt, userText) {
       '内置指令:',
       '/new      新建会话',
       '/status   查看额度状态',
+      '/ip       查询公网IP与SSH命令',
       '/ping     连通性测试',
       '/whoami   查看会话信息',
       '/fr       法语动词变位练习（先答题，再判分）',
@@ -1258,6 +1378,12 @@ async function handleBuiltinCommand(evt, userText) {
   if (lower === '/status') {
     const provider = getProvider();
     if (provider === 'claude-cli') {
+      const base = String(process.env.ANTHROPIC_BASE_URL || '').toLowerCase();
+      if (base.includes('deepseek.com')) {
+        const ds = await readDeepSeekBalanceStatus();
+        await safeReply(evt, ds.ok ? ds.text : `DeepSeek 额度查询失败：${ds.error}`);
+        return true;
+      }
       await safeReply(evt, [
         'Claude CLI 模式状态',
         `provider: claude-cli`,
@@ -1266,6 +1392,12 @@ async function handleBuiltinCommand(evt, userText) {
         '额度与用量请在 Claude Code 内执行 /status 查看。',
       ].join('\n'));
     } else if (provider === 'claude-acp') {
+      const base = String(process.env.ANTHROPIC_BASE_URL || '').toLowerCase();
+      if (base.includes('deepseek.com')) {
+        const ds = await readDeepSeekBalanceStatus();
+        await safeReply(evt, ds.ok ? ds.text : `DeepSeek 额度查询失败：${ds.error}`);
+        return true;
+      }
       await safeReply(evt, [
         'Claude ACP 模式状态',
         'provider: claude-acp',
@@ -1319,6 +1451,26 @@ async function handleBuiltinCommand(evt, userText) {
     return true;
   }
 
+  if (lower === '/ip') {
+    try {
+      const info = await readPublicIpFromCipCcNoProxy();
+      if (!info.ok) {
+        await safeReply(evt, `IP 查询失败：${info.error}`);
+        return true;
+      }
+      await safeReply(evt, [
+        `公网IP: ${info.ip}`,
+        `地址: ${info.addr || 'unknown'}`,
+        `运营商: ${info.isp || 'unknown'}`,
+        'source: cip.cc（no-proxy）',
+        `SSH: ssh -p 9780 pi@${info.ip}`,
+      ].join('\n'));
+    } catch (err) {
+      await safeReply(evt, `IP 查询失败：${String(err?.message || err)}`);
+    }
+    return true;
+  }
+
   if (lower === '/ping') {
     await safeReply(evt, 'pong');
     return true;
@@ -1339,6 +1491,10 @@ async function handleBuiltinCommand(evt, userText) {
 }
 
 function enqueue(evt) {
+  if (shouldDropDuplicateEvent(evt)) {
+    log(`[dedup] drop duplicate event message_id=${getEventMessageId(evt)}`);
+    return;
+  }
   const key = getSessionKey(evt);
   const s = ensureSession(key, evt);
   s.lastEvt = evt;
@@ -1380,7 +1536,6 @@ async function processSession(session) {
           Math.min(
             config.promptTimeoutMs,
             config.maxPromptTimeoutMs,
-            120_000,
           ),
         );
         const provider = getProvider();
@@ -1508,7 +1663,10 @@ async function processSession(session) {
 
 function startCleanupLoop() {
   if (cleanupTimer) clearInterval(cleanupTimer);
-  cleanupTimer = setInterval(cleanupIdleSessions, 2 * 60_000);
+  cleanupTimer = setInterval(() => {
+    cleanupIdleSessions();
+    cleanupSeenMessageIds();
+  }, 2 * 60_000);
   cleanupTimer.unref?.();
 }
 
