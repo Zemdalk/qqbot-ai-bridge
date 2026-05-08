@@ -115,7 +115,7 @@ CLAUDE_ACP_COMMAND=claude-agent-acp
 | `/new` | 重置当前会话上下文 |
 | `/help` | 查看帮助 |
 | `/status` | 查看后端状态/额度（DeepSeek-Claude 配置下会查询 DeepSeek `GET /user/balance`） |
-| `/ip` | 查询当前公网 IP（`cip.cc`，no-proxy）并给出 `ssh -p 9780 pi@<ip>` |
+| `/ip` | 查询当前公网 IP（`cip.cc`，no-proxy） |
 | `/ping` | 连通性测试 |
 | `/whoami` | 查看当前会话信息 |
 

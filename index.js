@@ -629,7 +629,7 @@ function buildSlashCommandMarkdown() {
     '',
     makeCmdInputTag('/new', '/new 新建会话'),
     makeCmdInputTag('/status', '/status 查看额度状态'),
-    makeCmdInputTag('/ip', '/ip 查询公网IP与SSH命令'),
+    makeCmdInputTag('/ip', '/ip 查询公网IP信息'),
     makeCmdInputTag('/whoami', '/whoami 查看会话信息'),
     makeCmdInputTag('/fr', '/fr 法语动词变位练习（1选择+1填空）'),
     makeCmdInputTag('/ping', '/ping 连通性测试'),
@@ -1348,7 +1348,7 @@ async function handleBuiltinCommand(evt, userText) {
       '内置指令:',
       '/new      新建会话',
       '/status   查看额度状态',
-      '/ip       查询公网IP与SSH命令',
+      '/ip       查询公网IP信息',
       '/ping     连通性测试',
       '/whoami   查看会话信息',
       '/fr       法语动词变位练习（先答题，再判分）',
@@ -1463,7 +1463,6 @@ async function handleBuiltinCommand(evt, userText) {
         `地址: ${info.addr || 'unknown'}`,
         `运营商: ${info.isp || 'unknown'}`,
         'source: cip.cc（no-proxy）',
-        `SSH: ssh -p 9780 pi@${info.ip}`,
       ].join('\n'));
     } catch (err) {
       await safeReply(evt, `IP 查询失败：${String(err?.message || err)}`);
